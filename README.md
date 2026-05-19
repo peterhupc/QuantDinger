@@ -125,13 +125,13 @@ Use **`docker compose`** (space). Legacy **`docker-compose`** (hyphen) works on 
 <details>
 <summary><b>Do not use <code>docker compose up --build</code> for a normal install</b></summary>
 
-`--build` forces a **frontend** build from `./QuantDinger-Vue/`. That directory is **not** shipped in this repo — you will see `QuantDinger-Vue not found` or extra pulls for `node:18-alpine`.
+A plain `docker compose up --build` does **not** rebuild the frontend — the main `docker-compose.yml` only declares `image:` for the frontend service, so `--build` only affects the backend. To rebuild the frontend from local Vue source you must opt in via the `docker-compose.build.yml` override (see below).
 
 | Goal | Command |
 |------|---------|
 | First-time / routine start | `docker compose pull` then `docker compose up -d` |
 | Rebuild **backend** only after code changes | `docker compose up -d --build backend` |
-| Hack on Vue UI from source | Clone [QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue) into `./QuantDinger-Vue/`, then `docker compose up -d --build` |
+| Hack on Vue UI from source | Clone [QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue) into `./QuantDinger-Vue/`, then `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build` |
 
 </details>
 
@@ -354,7 +354,7 @@ docker compose up -d
 
 - **`frontend`** — pulls `ghcr.io/brokermr810/quantdinger-frontend:3.0.10` (no local Vue tree required).
 - **`backend`** — built from `./backend_api_python` on first start if no local image exists yet.
-- Do **not** run `docker compose up -d --build` unless you have cloned **QuantDinger-Vue** into `./QuantDinger-Vue/` for UI development.
+- For UI development from Vue source, clone **QuantDinger-Vue** into `./QuantDinger-Vue/` and add `-f docker-compose.build.yml` to the command (see *Build the frontend from Vue source* below).
 
 Services: **`postgres`**, **`redis`**, **`backend`**, **`frontend`** (see `docker-compose.yml`).
 
@@ -392,10 +392,10 @@ If you have access to the **QuantDinger-Vue** repo and want to iterate on UI sou
 
 ```bash
 git clone https://github.com/brokermr810/QuantDinger-Vue.git QuantDinger-Vue
-docker compose up -d --build      # frontend builds from ./QuantDinger-Vue
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-Without `--build` Compose pulls the GHCR image as usual — the `./QuantDinger-Vue/` directory is referenced lazily and may not exist. Point `FRONTEND_SRC_PATH=/abs/path/to/QuantDinger-Vue` if you'd rather keep the source somewhere else. The locally built image is tagged the same way as the published one (`FRONTEND_TAG` / `IMAGE_TAG` rules apply), so it slots into the rest of the stack with no further changes.
+The main `docker-compose.yml` only pulls the GHCR image; the override file `docker-compose.build.yml` adds the local `build:` block. Without the override, `./QuantDinger-Vue/` does not need to exist. Point `FRONTEND_SRC_PATH=/abs/path/to/QuantDinger-Vue` if you'd rather keep the source somewhere else, or set `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in a root `.env` to skip the long `-f -f` invocation. The locally built image is tagged the same way as the published one (`FRONTEND_TAG` / `IMAGE_TAG` rules apply), so it slots into the rest of the stack with no further changes.
 
 ### 5) Verify and sign in
 
@@ -436,7 +436,7 @@ If `py` is not on PATH, use `python` or `python3` in the one-liner that generate
 
 | Symptom | What to check |
 |---------|----------------|
-| `QuantDinger-Vue` not found | You used `--build` without cloning Vue source. Use `docker compose up -d` (no `--build`) or clone into `./QuantDinger-Vue/` first. |
+| `QuantDinger-Vue` not found | You added `-f docker-compose.build.yml` without cloning Vue source. Drop the override (plain `docker compose up -d`) or clone into `./QuantDinger-Vue/` first. |
 | `redis` / `python` / `node` pull fails, `content size of zero` | Docker Hub unreachable from Docker Desktop. Set root `.env` `IMAGE_PREFIX=docker.m.daocloud.io/library/` and/or configure **Docker Desktop → Proxies** (system VPN alone is often not enough). |
 | Backend exits immediately | `SECRET_KEY` still default, or invalid `.env` syntax. Read `docker compose logs backend`. |
 | Blank page or API errors from browser | `FRONTEND_URL` / origins mismatch; API not reachable from the host you opened. |
