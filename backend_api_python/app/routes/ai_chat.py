@@ -9,11 +9,9 @@ from __future__ import annotations
 import json
 import math
 import re
-from io import BytesIO
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
-import requests
 from flask import Response, g, jsonify, request, stream_with_context
 
 from app.openapi.blueprint import HumanBlueprint as Blueprint
@@ -482,8 +480,6 @@ def _summarize_klines(klines: list[dict], timeframe: str) -> dict:
         return {"timeframe": timeframe, "available": False, "bars": len(clean)}
 
     closes = [x["close"] for x in clean]
-    highs = [x["high"] for x in clean]
-    lows = [x["low"] for x in clean]
     volumes = [x["volume"] for x in clean if x["volume"] is not None]
     last = clean[-1]
     ema20 = _ema(closes, 20)
@@ -836,7 +832,7 @@ def _search_intelligence(message: str, candidates: list[dict], language: str) ->
 
 def _macro_intelligence(message: str) -> dict:
     text = (message or "").lower()
-    if not any(k in text for k in ("非农", "nfp", "cpi", "fomc", "fed", "利率", "就业", "失业", "pce", "gdp", "通胀", "macro", "payroll")):
+    if not any(k in text for k in ("非农", "nfp", "cpi", "fomc", "fed", "利率", "就业", "失业", "pce", "gdp", "通胀", "宏观", "macro", "payroll", "inflation", "rate")):
         return {}
     profile = _macro_question_profile(message)
     try:
@@ -868,11 +864,11 @@ def _macro_question_profile(message: str) -> dict:
         indicator = "US_NONFARM_PAYROLLS"
         aliases = ["nonfarm payroll", "non farm payroll", "nfp", "非农", "就业人口"]
         country = "US"
-    elif any(k in text for k in ("cpi", "通胀", "inflation")):
+    elif any(k in text for k in ("cpi", "通胀", "inflation", "consumer price")):
         indicator = "US_CPI"
         aliases = ["cpi", "consumer price index", "通胀", "消费者物价"]
-        country = "US" if any(k in text for k in ("美国", "us", "u.s", "america")) else ""
-    elif any(k in text for k in ("fomc", "fed", "利率", "降息", "加息")):
+        country = "US"
+    elif any(k in text for k in ("fomc", "fed", "利率", "降息", "加息", "rate")):
         indicator = "FOMC_RATE_DECISION"
         aliases = ["fomc", "fed", "federal funds", "interest rate", "利率", "降息", "加息"]
         country = "US" if any(k in text for k in ("美国", "us", "u.s", "america", "fed", "fomc")) else ""
@@ -913,8 +909,10 @@ def _filter_macro_events(events: list[dict], profile: dict) -> list[dict]:
             str(event.get(key) or "")
             for key in ("event", "event_en", "name", "title", "country", "country_code", "category", "description")
         ).lower()
+        if country and country not in haystack:
+            continue
         score = sum(2 for alias in aliases if alias and alias in haystack)
-        if score and country and country in haystack:
+        if score and country:
             score += 1
         if score:
             scored.append((score, event))
@@ -943,15 +941,41 @@ def _macro_release_lookup(message: str, profile: dict, events: list[dict], paylo
         "setup_guidance": [],
     }
 
-    event_value = _extract_macro_value_from_events(events)
-    if event_value.get("actual") is not None or event_value.get("forecast") is not None or event_value.get("previous") is not None:
-        result.update(event_value)
+    calendar_value = _extract_macro_value_from_events(events)
+    if calendar_value.get("actual") is not None:
+        result.update(calendar_value)
         result["status"] = "ok"
-        result["answerable"] = result.get("actual") is not None
+        result["answerable"] = True
         result["source_chain"].append("economic_calendar")
         return result
+    if calendar_value.get("forecast") is not None or calendar_value.get("previous") is not None:
+        result["provider_status"]["calendar_release"] = calendar_value
+        result.update(calendar_value)
+        result["status"] = "partial_calendar"
+        result["source_chain"].append("economic_calendar")
+
+    if indicator == "US_CPI":
+        bls_value = _fetch_bls_cpi()
+        result["source_chain"].append("bls_public_api")
+        if bls_value.get("status") == "ok":
+            result.update(bls_value)
+            if result.get("forecast") is None and calendar_value.get("forecast") is not None:
+                result["forecast"] = calendar_value.get("forecast")
+            result["answerable"] = True
+            return result
+        result["provider_status"]["bls"] = bls_value
 
     if indicator == "US_NONFARM_PAYROLLS":
+        bls_value = _fetch_bls_nonfarm_payrolls()
+        result["source_chain"].append("bls_public_api")
+        if bls_value.get("status") == "ok":
+            result.update(bls_value)
+            if result.get("forecast") is None and calendar_value.get("forecast") is not None:
+                result["forecast"] = calendar_value.get("forecast")
+            result["answerable"] = True
+            return result
+        result["provider_status"]["bls"] = bls_value
+
         akshare_value = _fetch_akshare_nonfarm_payrolls()
         result["source_chain"].append("akshare_macro_usa_non_farm")
         if akshare_value.get("status") == "ok":
@@ -959,14 +983,6 @@ def _macro_release_lookup(message: str, profile: dict, events: list[dict], paylo
             result["answerable"] = True
             return result
         result["provider_status"]["akshare_non_farm"] = akshare_value
-
-        bls_value = _fetch_bls_nonfarm_payrolls()
-        result["source_chain"].append("bls_public_api")
-        if bls_value.get("status") == "ok":
-            result.update(bls_value)
-            result["answerable"] = True
-            return result
-        result["provider_status"]["bls"] = bls_value
 
     search_value = _macro_search_lookup(message, profile)
     result["source_chain"].append("web_search")
@@ -1011,27 +1027,88 @@ def _first_present(obj: dict, keys: tuple[str, ...]) -> Any:
     return None
 
 
-def _fetch_bls_nonfarm_payrolls() -> dict:
-    current_year = _now_utc().year
-    url = "https://api.bls.gov/publicAPI/v2/timeseries/data/CES0000000001"
-    params = {"startyear": str(current_year - 1), "endyear": str(current_year)}
-    try:
-        response = requests.get(url, params=params, timeout=4)
-        response.raise_for_status()
-        data = response.json()
-        series = (((data.get("Results") or {}).get("series") or [{}])[0].get("data") or [])
-        points = []
-        for item in series:
-            period = str(item.get("period") or "")
-            if not period.startswith("M") or period == "M13":
-                continue
+def _bls_monthly_points(series: list[dict]) -> list[tuple[int, int, float, dict]]:
+    points: list[tuple[int, int, float, dict]] = []
+    for item in series or []:
+        period = str(item.get("period") or "")
+        if not period.startswith("M") or period == "M13":
+            continue
+        try:
             year = int(item.get("year"))
             month = int(period[1:])
             value = float(item.get("value"))
-            points.append((year, month, value, item))
-        points.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        except Exception:
+            continue
+        points.append((year, month, value, item))
+    points.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return points
+
+
+def _fetch_bls_cpi() -> dict:
+    current_year = _now_utc().year
+    series_id = "CUSR0000SA0"
+    try:
+        data = get_macro_series_provider().fetch_bls_series([series_id], current_year - 2, current_year)
+        series = ((data.get("series") or [{}])[0].get("data") or [])
+        points = _bls_monthly_points(series)
+        if len(points) < 13:
+            return {
+                "status": "empty",
+                "message": "BLS returned fewer than 13 monthly CPI observations.",
+                "bls_status": data.get("status"),
+                "bls_messages": data.get("messages") or [],
+            }
+        latest = points[0]
+        previous_month = points[1]
+        same_month_last_year = next((p for p in points if p[0] == latest[0] - 1 and p[1] == latest[1]), None)
+        prior_same_month_last_year = next((p for p in points if p[0] == previous_month[0] - 1 and p[1] == previous_month[1]), None)
+        if not same_month_last_year:
+            return {"status": "empty", "message": "BLS CPI series has no same-month prior-year observation."}
+        yoy_pct = ((latest[2] / same_month_last_year[2]) - 1.0) * 100.0
+        mom_pct = ((latest[2] / previous_month[2]) - 1.0) * 100.0 if previous_month[2] else None
+        previous_yoy_pct = (
+            ((previous_month[2] / prior_same_month_last_year[2]) - 1.0) * 100.0
+            if prior_same_month_last_year and prior_same_month_last_year[2]
+            else None
+        )
+        return {
+            "status": "ok",
+            "actual": round(yoy_pct, 2),
+            "forecast": None,
+            "previous": round(previous_yoy_pct, 2) if previous_yoy_pct is not None else None,
+            "period": f"{latest[0]}-{latest[1]:02d}",
+            "release_time": "",
+            "unit": "CPI-U seasonally adjusted, year-over-year percent change",
+            "details": {
+                "series_id": series_id,
+                "index_level": latest[2],
+                "month_over_month_pct": round(mom_pct, 2) if mom_pct is not None else None,
+            },
+            "evidence": [{
+                "source": "BLS public API",
+                "title": "CUSR0000SA0 CPI for All Urban Consumers: All Items, seasonally adjusted",
+                "snippet": f"Latest CPI index {latest[2]:.3f}; YoY {yoy_pct:.2f}%; MoM {mom_pct:.2f}%." if mom_pct is not None else f"Latest CPI index {latest[2]:.3f}; YoY {yoy_pct:.2f}%.",
+                "url": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
+            }],
+        }
+    except Exception as exc:
+        return {"status": "unavailable", "message": str(exc)}
+
+
+def _fetch_bls_nonfarm_payrolls() -> dict:
+    current_year = _now_utc().year
+    series_id = "CES0000000001"
+    try:
+        data = get_macro_series_provider().fetch_bls_series([series_id], current_year - 1, current_year)
+        series = ((data.get("series") or [{}])[0].get("data") or [])
+        points = _bls_monthly_points(series)
         if len(points) < 2:
-            return {"status": "empty", "message": "BLS returned fewer than two monthly observations."}
+            return {
+                "status": "empty",
+                "message": "BLS returned fewer than two monthly observations.",
+                "bls_status": data.get("status"),
+                "bls_messages": data.get("messages") or [],
+            }
         latest, previous = points[0], points[1]
         change_thousands = latest[2] - previous[2]
         return {
@@ -1046,7 +1123,7 @@ def _fetch_bls_nonfarm_payrolls() -> dict:
                 "source": "BLS public API",
                 "title": "CES0000000001 All employees, total nonfarm, seasonally adjusted",
                 "snippet": f"Latest level {latest[2]:.0f}k vs previous {previous[2]:.0f}k; computed change {change_thousands:.0f}k.",
-                "url": url,
+                "url": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
             }],
         }
     except Exception as exc:
@@ -2021,7 +2098,15 @@ def chat_message():
                 sid = int(session["id"])
             else:
                 sid = _create_session(cur, user_id, _title_from_message(message or "Chart analysis"), context)
-            user_message_id = _insert_message(cur, sid, user_id, "user", message or "[image]", attachments, intent)
+            user_message_id = _insert_message(
+                cur,
+                session_id=sid,
+                user_id=user_id,
+                role="user",
+                content=message or "[image]",
+                attachments=attachments,
+                intent=intent,
+            )
             cur.execute("UPDATE qd_ai_copilot_sessions SET updated_at = NOW() WHERE id = ?", (sid,))
             db.commit()
 
@@ -2042,7 +2127,16 @@ def chat_message():
             if not answer:
                 answer = "The model did not return a usable answer."
 
-            assistant_id = _insert_message(cur, sid, user_id, "assistant", answer, [], intent, actions=parsed.get("actions") or [])
+            assistant_id = _insert_message(
+                cur,
+                session_id=sid,
+                user_id=user_id,
+                role="assistant",
+                content=answer,
+                attachments=[],
+                intent=intent,
+                actions=parsed.get("actions") or [],
+            )
             cur.execute(
                 "UPDATE qd_ai_copilot_sessions SET title = COALESCE(NULLIF(title, ''), ?), updated_at = NOW() WHERE id = ?",
                 ((parsed.get("summary") or _title_from_message(message or answer))[:120], sid),
@@ -2115,7 +2209,15 @@ def chat_message_stream():
                     sid = int(session["id"])
                 else:
                     sid = _create_session(cur, user_id, _title_from_message(message or "Chart analysis"), context)
-                user_message_id = _insert_message(cur, sid, user_id, "user", message or "[image]", attachments, intent)
+                user_message_id = _insert_message(
+                    cur,
+                    session_id=sid,
+                    user_id=user_id,
+                    role="user",
+                    content=message or "[image]",
+                    attachments=attachments,
+                    intent=intent,
+                )
                 cur.execute("UPDATE qd_ai_copilot_sessions SET updated_at = NOW() WHERE id = ?", (sid,))
                 db.commit()
 
@@ -2141,7 +2243,15 @@ def chat_message_stream():
                     yield _sse("delta", {"text": delta})
 
                 answer = "".join(chunks).strip() or "The model did not return a usable answer."
-                assistant_id = _insert_message(cur, sid, user_id, "assistant", answer, [], intent)
+                assistant_id = _insert_message(
+                    cur,
+                    session_id=sid,
+                    user_id=user_id,
+                    role="assistant",
+                    content=answer,
+                    attachments=[],
+                    intent=intent,
+                )
                 cur.execute(
                     "UPDATE qd_ai_copilot_sessions SET title = COALESCE(NULLIF(title, ''), ?), updated_at = NOW() WHERE id = ?",
                     (_title_from_message(message or answer)[:120], sid),
@@ -2344,12 +2454,12 @@ def save_local_chat_message():
                 sid = _create_session(cur, user_id, _title_from_message(content), context)
             mid = _insert_message(
                 cur,
-                sid,
-                user_id,
-                role,
-                content,
-                attachments,
-                intent,
+                session_id=sid,
+                user_id=user_id,
+                role=role,
+                content=content,
+                attachments=attachments,
+                intent=intent,
                 actions=actions,
                 report=report,
                 report_target=report_target,
