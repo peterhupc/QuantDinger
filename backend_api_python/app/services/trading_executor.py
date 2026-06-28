@@ -3117,6 +3117,14 @@ class TradingExecutor:
     ) -> Optional[float]:
         """Fetch current price from the market data source selected by market_category."""
         mt_key = (kline_market_type or market_type or "").strip().lower()
+        ex_key = (exchange_id or "").strip().lower()
+        if not ex_key and (market_category or "").strip() == "Crypto":
+            try:
+                from app.config.data_sources import CCXTConfig
+
+                ex_key = (CCXTConfig.DEFAULT_EXCHANGE or "binance").strip().lower()
+            except Exception:
+                ex_key = "binance"
         # Local in-memory cache first
         cache_key = f"{market_category}:{ex_key}:{mt_key}:{(symbol or '').strip().upper()}"
         if cache_key and self._price_cache_ttl_sec > 0:
