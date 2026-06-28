@@ -424,12 +424,12 @@ The backend entrypoint auto-generates a random `SECRET_KEY` on first start and a
 
 ```env
 # Common case: lockstep both sides to one tag
-IMAGE_TAG=4.0.3
+IMAGE_TAG=4.0.4
 
 # Advanced (opt-in): decouple sides. Either var alone overrides only
 # that side; the other still follows IMAGE_TAG.
-# BACKEND_TAG=4.0.3
-# FRONTEND_TAG=4.0.3
+# BACKEND_TAG=4.0.4
+# FRONTEND_TAG=4.0.4
 # MOBILE_TAG=4.0.3
 
 # BACKEND_IMAGE=ghcr.io/<your-fork>/quantdinger-backend     # optional, for forks
@@ -441,7 +441,7 @@ Tag resolution: `BACKEND_TAG` / `FRONTEND_TAG` / `MOBILE_TAG` → `IMAGE_TAG` �
 
 #### Version stamping
 
-Published backend images are stamped from the Git release tag automatically. A `v4.0.3` tag becomes `APP_VERSION=4.0.3`, which is what OpenAPI metadata and the UI brand config expose. Local source runs fall back to `git describe` and then the repo-root `VERSION` file; local Docker builds can override explicitly:
+Published backend images are stamped from the Git release tag automatically. A `v4.0.4` tag becomes `APP_VERSION=4.0.4`, which is what OpenAPI metadata and the UI brand config expose. Local source runs fall back to `git describe` and then the repo-root `VERSION` file; local Docker builds can override explicitly:
 
 ```bash
 APP_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//') docker compose up -d --build backend
@@ -718,6 +718,9 @@ Economic calendar data is free-first: QuantDinger uses the no-key AkShare/Wallst
 | Doc | Notes |
 |-----|--------|
 | [Human Web API (OpenAPI)](docs/api/openapi.yaml) | flask-smorest spec — browse with [`docs/api/index.html`](docs/api/index.html) (HTTP server required) |
+| [Backend architecture](docs/ARCHITECTURE.md) | Runtime surfaces, ownership boundaries, and refactor rules |
+| [Extension guide](docs/EXTENSION_GUIDE.md) | How to add APIs, adapters, data sources, workers, and strategy features |
+| [Module boundaries](docs/MODULE_BOUNDARIES.md) | Deeper backend module ownership notes |
 | [API conventions](docs/API_CONVENTIONS.md) | Auth, envelopes, visibility tiers |
 | [Changelog](docs/CHANGELOG.md) | Releases & migrations |
 | [README (Chinese)](docs/README_CN.md) | Chinese overview |

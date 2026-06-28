@@ -1,4 +1,4 @@
-﻿import os
+import os
 import time
 import json
 import threading
@@ -8,8 +8,13 @@ from datetime import datetime
 
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
-from app.services.symbol_name import normalize_crypto_symbol
 from app.services.exchange_execution import coalesce_exchange_config_from_payload
+from app.services.strategy_config import (
+    apply_cross_sectional_trading_config as _apply_cross_sectional_trading_config,
+    apply_default_strict_mode as _apply_default_strict_mode,
+    apply_risk_flat_from_indicator_code as _apply_risk_flat_from_indicator_code,
+    strip_legacy_risk_pct_basis as _strip_legacy_risk_pct_basis,
+)
 
 logger = get_logger(__name__)
 
@@ -22,134 +27,6 @@ def get_strategy_service() -> "StrategyService":
     if _strategy_service_singleton is None:
         _strategy_service_singleton = StrategyService()
     return _strategy_service_singleton
-
-
-def _normalize_cross_sectional_symbol_list(
-    symbol_list: List[Any],
-    market_category: str,
-) -> List[str]:
-    """Normalize universe entries to ``Market:SYMBOL`` (Crypto symbols canonicalized)."""
-    out: List[str] = []
-    default_market = (market_category or "Crypto").strip() or "Crypto"
-    for entry in symbol_list or []:
-        raw = str(entry or "").strip()
-        if not raw:
-            continue
-        if ":" in raw:
-            mkt, sym = raw.split(":", 1)
-            mkt = (mkt or default_market).strip() or default_market
-        else:
-            mkt, sym = default_market, raw
-        sym = sym.strip()
-        if not sym:
-            continue
-        if mkt == "Crypto":
-            sym = normalize_crypto_symbol(sym)
-        out.append(f"{mkt}:{sym}")
-    return out
-
-
-def _apply_cross_sectional_trading_config(
-    trading_config: Dict[str, Any],
-    *,
-    cs_strategy_type: str,
-    symbol_list: List[Any],
-    portfolio_size: Any,
-    long_ratio: Any,
-    rebalance_frequency: Any,
-    market_category: str,
-    market_type: str,
-) -> Dict[str, Any]:
-    """Validate and persist cross-sectional fields inside trading_config."""
-    tc = dict(trading_config or {})
-    cs = (cs_strategy_type or "single").strip().lower()
-    if cs != "cross_sectional":
-        tc["cs_strategy_type"] = "single"
-        return tc
-
-    norm_list = _normalize_cross_sectional_symbol_list(symbol_list, market_category)
-    if len(norm_list) < 2:
-        raise ValueError("cross_sectional requires at least 2 symbols in symbol_list")
-
-    try:
-        psize = int(portfolio_size or 10)
-    except (TypeError, ValueError):
-        psize = 10
-    if psize < 1:
-        raise ValueError("portfolio_size must be >= 1")
-    if psize > len(norm_list):
-        raise ValueError("portfolio_size cannot exceed the number of symbols in symbol_list")
-
-    try:
-        lr = float(long_ratio if long_ratio is not None else 0.5)
-    except (TypeError, ValueError):
-        lr = 0.5
-    lr = max(0.0, min(1.0, lr))
-    mt = (market_type or "swap").strip().lower()
-    if mt == "spot" and lr < 1.0:
-        lr = 1.0
-
-    freq = (rebalance_frequency or "daily").strip().lower()
-    if freq not in ("daily", "weekly", "monthly"):
-        freq = "daily"
-
-    tc["cs_strategy_type"] = "cross_sectional"
-    tc["symbol_list"] = norm_list
-    tc["portfolio_size"] = psize
-    tc["long_ratio"] = lr
-    tc["rebalance_frequency"] = freq
-    tc["strategy_type"] = "cross_sectional"
-    primary_sym = norm_list[0].split(":", 1)[-1]
-    tc["symbol"] = primary_sym
-    return tc
-
-
-def _apply_default_strict_mode(trading_config: Dict[str, Any]) -> Dict[str, Any]:
-    """Default new strategies to strict (backtest-aligned) live execution."""
-    tc = dict(trading_config or {})
-    if "strict_mode" not in tc and "strictMode" not in tc:
-        tc["strict_mode"] = True
-    return tc
-
-
-def _strip_legacy_risk_pct_basis(trading_config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    SL / TP / trailing percentages are unified as the underlying's % price
-    move directly (no leverage scaling at trigger time). The legacy
-    ``risk_pct_basis`` toggle is removed; any stale value on incoming
-    payloads is discarded so it cannot re-introduce a margin-vs-price
-    branch on the server.
-    """
-    tc = dict(trading_config or {})
-    tc.pop("risk_pct_basis", None)
-    tc.pop("riskPctBasis", None)
-    return tc
-
-
-def _apply_risk_flat_from_indicator_code(
-    trading_config: Dict[str, Any],
-    indicator_config: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """
-    When indicator code declares @strategy risk keys, persist matching flat
-    trading_config.*_pct fields (percent units) so DB/UI/backtest-center stay
-    aligned with the same semantics as live runtime code parsing.
-    """
-    ic = indicator_config if isinstance(indicator_config, dict) else {}
-    code = ic.get("indicator_code") or ""
-    if not str(code).strip():
-        return dict(trading_config or {})
-    from app.services.indicator_params import StrategyConfigParser
-
-    flat = StrategyConfigParser.to_trading_config_risk_flat(str(code))
-    if not flat:
-        return dict(trading_config or {})
-    tc = dict(trading_config or {})
-    explicit_trade_direction = tc.get("trade_direction")
-    tc.update(flat)
-    if explicit_trade_direction:
-        tc["trade_direction"] = explicit_trade_direction
-    return tc
 
 
 # Note: broker / market / market_type / trade_direction / bot_type compatibility

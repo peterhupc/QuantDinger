@@ -635,9 +635,12 @@ CREATE TABLE IF NOT EXISTS qd_indicator_codes (
    review_note text DEFAULT ''::text NULL,
    reviewed_at timestamp NULL,
    reviewed_by int4 NULL,
+   asset_type varchar(32) DEFAULT 'indicator'::character varying NULL,
     -- 对已购用户而言，本地副本通过此字段关联到市场上的原始指标，
     -- 用于后续"同步代码"功能拉取发布者的最新版本
     source_indicator_id int4 NULL,
+    source_script_source_id int4 NULL,
+    source_strategy_id int4 NULL,
     -- 多语言支持：用户上传的 name / description 用 source_language 标识原始语言
     -- (zh-CN / en-US / ja-JP 等)；name_i18n / description_i18n 是 LLM 翻译生成的
     -- JSONB，结构形如 {"en-US": "...", "zh-CN": "...", ...}。
@@ -654,6 +657,8 @@ CREATE TABLE IF NOT EXISTS qd_indicator_codes (
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_user_id ON qd_indicator_codes USING btree (user_id);
 CREATE INDEX IF NOT EXISTS idx_indicator_review_status ON qd_indicator_codes USING btree (review_status);
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_source ON qd_indicator_codes USING btree (source_indicator_id);
+CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_script ON qd_indicator_codes USING btree (source_script_source_id);
+CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_strategy ON qd_indicator_codes USING btree (source_strategy_id);
 
 CREATE TABLE IF NOT EXISTS qd_indicator_code_versions (
    id serial4 NOT NULL,

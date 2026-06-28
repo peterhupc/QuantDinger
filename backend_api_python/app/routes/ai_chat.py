@@ -1,4 +1,4 @@
-﻿"""AI Copilot chat routes.
+"""AI Copilot chat routes.
 
 The Copilot is intentionally thin: it stores conversations, accepts optional
 chart screenshots, charges credits through the central billing service, and
@@ -29,6 +29,21 @@ from app.services.ai_skill_registry import (
     set_skill_enabled,
 )
 from app.services.ai_tool_registry import build_tool_prompt, public_tool_registry
+from app.services.ai_copilot_store import (
+    create_session as store_create_session,
+    detect_memory_candidates as store_detect_memory_candidates,
+    ensure_tables as store_ensure_tables,
+    get_session as store_get_session,
+    get_user_memories as store_get_user_memories,
+    insert_message as store_insert_message,
+    json_dumps as store_json_dumps,
+    json_loads as store_json_loads,
+    load_recent_messages as store_load_recent_messages,
+    now_utc as store_now_utc,
+    row_to_dict as store_row_to_dict,
+    title_from_message as store_title_from_message,
+)
+from app.services.ai_report_pdf import build_ai_report_pdf
 from app.services.kline import KlineService
 from app.services.llm import LLMService
 from app.services.search import get_search_service
@@ -50,11 +65,11 @@ ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return store_now_utc()
 
 
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return store_json_dumps(value)
 
 
 def _plain_text(value: Any) -> str:
@@ -66,156 +81,26 @@ def _plain_text(value: Any) -> str:
 
 
 def _row_to_dict(row: Any) -> dict:
-    return dict(row or {})
+    return store_row_to_dict(row)
 
 
 def _json_loads(value: Any, default: Any = None) -> Any:
-    if value is None or value == "":
-        return default
-    try:
-        return json.loads(value)
-    except Exception:
-        return default
+    return store_json_loads(value, default)
 
 
 def _get_user_memories(cur, user_id: int, limit: int = 12) -> list[dict]:
-    try:
-        cur.execute(
-            """
-            SELECT id, category, title, content, confidence, updated_at
-            FROM qd_ai_user_memories
-            WHERE user_id = ? AND is_active = TRUE
-            ORDER BY updated_at DESC, id DESC
-            LIMIT ?
-            """,
-            (user_id, int(limit)),
-        )
-        rows = cur.fetchall() or []
-        return [_row_to_dict(r) for r in rows]
-    except Exception as e:
-        logger.debug(f"Failed to load user memories: {e}")
-        return []
+    return store_get_user_memories(cur, user_id, limit)
 
 
 def _detect_memory_candidates(message: str, language: str) -> list[dict]:
-    text = (message or "").strip()
-    if len(text) < 8:
-        return []
-    lower = text.lower()
-    zh = (language or "").lower().startswith("zh")
-    markers = [
-        "我偏好", "我的偏好", "我喜欢", "我不喜欢", "不要", "不希望", "风险偏好", "交易周期",
-        "timeframe", "risk profile", "i prefer", "i like", "i don't want", "avoid", "do not"
-    ]
-    if not any(m.lower() in lower for m in markers):
-        return []
-    title = "交易偏好" if zh else "Trading preference"
-    if any(m in lower for m in ("不要", "不希望", "avoid", "don't want", "do not")):
-        title = "交易限制" if zh else "Trading constraint"
-    return [{
-        "category": "preference",
-        "title": title,
-        "content": text[:500],
-        "confidence": 75,
-    }]
+    return store_detect_memory_candidates(message, language)
 
 
 def _ensure_tables(cur) -> None:
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS qd_ai_copilot_sessions (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            title VARCHAR(160),
-            context_symbol VARCHAR(64),
-            context_market VARCHAR(32),
-            context_strategy_id INTEGER,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS qd_ai_copilot_messages (
-            id SERIAL PRIMARY KEY,
-            session_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            role VARCHAR(16) NOT NULL,
-            content TEXT NOT NULL,
-            attachments_json TEXT,
-            actions_json TEXT,
-            report_json TEXT,
-            report_target_json TEXT,
-            report_error TEXT,
-            report_error_tone VARCHAR(32),
-            intent VARCHAR(48),
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS qd_ai_copilot_tool_calls (
-            id SERIAL PRIMARY KEY,
-            session_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            tool_name VARCHAR(64) NOT NULL,
-            status VARCHAR(24) NOT NULL,
-            input_json TEXT,
-            output_json TEXT,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS qd_ai_user_memories (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            category VARCHAR(48) NOT NULL DEFAULT 'preference',
-            title VARCHAR(160) NOT NULL,
-            content TEXT NOT NULL,
-            source VARCHAR(48) DEFAULT 'copilot',
-            confidence INTEGER DEFAULT 70,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        )
-        """
-    )
-    for ddl in (
-        "ALTER TABLE qd_ai_copilot_messages ADD COLUMN IF NOT EXISTS actions_json TEXT",
-        "ALTER TABLE qd_ai_copilot_messages ADD COLUMN IF NOT EXISTS report_json TEXT",
-        "ALTER TABLE qd_ai_copilot_messages ADD COLUMN IF NOT EXISTS report_target_json TEXT",
-        "ALTER TABLE qd_ai_copilot_messages ADD COLUMN IF NOT EXISTS report_error TEXT",
-        "ALTER TABLE qd_ai_copilot_messages ADD COLUMN IF NOT EXISTS report_error_tone VARCHAR(32)",
-    ):
-        try:
-            cur.execute(ddl)
-        except Exception:
-            try:
-                cur.execute(ddl.replace(" IF NOT EXISTS", ""))
-            except Exception:
-                # SQLite compatibility in older local deployments.
-                pass
-    for ddl in (
-        "CREATE INDEX IF NOT EXISTS idx_qd_ai_copilot_sessions_user ON qd_ai_copilot_sessions(user_id, updated_at)",
-        "CREATE INDEX IF NOT EXISTS idx_qd_ai_copilot_messages_session ON qd_ai_copilot_messages(session_id, id)",
-        "CREATE INDEX IF NOT EXISTS idx_qd_ai_user_memories_user ON qd_ai_user_memories(user_id, is_active, updated_at)",
-    ):
-        try:
-            cur.execute(ddl)
-        except Exception:
-            pass
-
+    store_ensure_tables(cur)
 
 def _title_from_message(message: str) -> str:
-    title = re.sub(r"\s+", " ", (message or "").strip())
-    if not title:
-        return "New Copilot Chat"
-    return title[:60]
-
+    return store_title_from_message(message)
 
 def _detect_intent(message: str, has_image: bool) -> str:
     text = (message or "").lower()
@@ -482,92 +367,46 @@ def _attachment_meta(attachments: list[dict]) -> list[dict]:
 
 
 def _get_session(cur, user_id: int, session_id: int | None) -> dict | None:
-    if not session_id:
-        return None
-    cur.execute(
-        "SELECT * FROM qd_ai_copilot_sessions WHERE id = ? AND user_id = ?",
-        (session_id, user_id),
-    )
-    row = cur.fetchone()
-    return _row_to_dict(row) if row else None
+    return store_get_session(cur, user_id, session_id)
 
 
 def _create_session(cur, user_id: int, title: str, context: dict) -> int:
-    cur.execute(
-        """
-        INSERT INTO qd_ai_copilot_sessions
-        (user_id, title, context_symbol, context_market, context_strategy_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        RETURNING id
-        """,
-        (
-            user_id,
-            title,
-            (context.get("symbol") or "")[:64],
-            (context.get("market") or "")[:32],
-            context.get("strategy_id"),
-            _now_utc(),
-            _now_utc(),
-        ),
-    )
-    row = cur.fetchone()
-    return int(row["id"] if isinstance(row, dict) else row[0])
+    return store_create_session(cur, user_id, title, context)
 
 
 def _insert_message(
     cur,
+    *,
     session_id: int,
     user_id: int,
     role: str,
     content: str,
-    attachments: list[dict],
-    intent: str,
+    attachments: list[dict] | None = None,
     actions: list[dict] | None = None,
     report: dict | None = None,
     report_target: dict | None = None,
     report_error: str | None = None,
     report_error_tone: str | None = None,
+    intent: str | None = None,
 ) -> int:
-    cur.execute(
-        """
-        INSERT INTO qd_ai_copilot_messages
-        (session_id, user_id, role, content, attachments_json, actions_json, report_json, report_target_json, report_error, report_error_tone, intent, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING id
-        """,
-        (
-            session_id,
-            user_id,
-            role,
-            content,
-            _json_dumps(_attachment_meta(attachments)) if attachments else None,
-            _json_dumps(actions or []) if actions else None,
-            _json_dumps(report) if isinstance(report, dict) and report else None,
-            _json_dumps(report_target) if isinstance(report_target, dict) and report_target else None,
-            str(report_error or "")[:1000] if report_error else None,
-            str(report_error_tone or "")[:32] if report_error_tone else None,
-            intent,
-            _now_utc(),
-        ),
+    return store_insert_message(
+        cur,
+        session_id=session_id,
+        user_id=user_id,
+        role=role,
+        content=content,
+        attachments=attachments,
+        actions=actions,
+        report=report,
+        report_target=report_target,
+        report_error=report_error,
+        report_error_tone=report_error_tone,
+        intent=intent,
     )
-    row = cur.fetchone()
-    return int(row["id"] if isinstance(row, dict) else row[0])
 
 
 def _load_recent_messages(cur, session_id: int, limit: int = 12) -> list[dict]:
-    cur.execute(
-        """
-        SELECT role, content, attachments_json, actions_json, intent, created_at
-        FROM qd_ai_copilot_messages
-        WHERE session_id = ?
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (session_id, limit),
-    )
-    rows = cur.fetchall() or []
-    return [_row_to_dict(r) for r in reversed(rows)]
-
+    return store_load_recent_messages(cur, session_id, limit)
 
 def _to_float(value: Any, default: float | None = None) -> float | None:
     try:
@@ -2526,341 +2365,6 @@ def save_local_chat_message():
         return jsonify({"code": 0, "msg": str(e), "data": None}), 500
 
 
-def _has_cjk_text(value: Any) -> bool:
-    text = _plain_text(value)
-    return bool(re.search(r"[\u2e80-\u9fff\uac00-\ud7af\u3040-\u30ff]", text))
-
-
-def _register_report_pdf_font(prefer_cjk: bool = False) -> str:
-    from pathlib import Path
-
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-    candidates = [
-        ("C:/Windows/Fonts/msyh.ttc", True),
-        ("C:/Windows/Fonts/msyh.ttf", True),
-        ("C:/Windows/Fonts/simsun.ttc", True),
-        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", True),
-        ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", True),
-        ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", True),
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", False),
-    ]
-    for path, is_cjk in candidates:
-        if prefer_cjk and not is_cjk:
-            continue
-        try:
-            if Path(path).exists():
-                pdfmetrics.registerFont(TTFont("QuantDingerSans", path))
-                return "QuantDingerSans"
-        except Exception as e:
-            logger.debug(f"Failed to register PDF font {path}: {e}")
-    if prefer_cjk:
-        try:
-            from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-
-            pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
-            return "STSong-Light"
-        except Exception as e:
-            logger.debug(f"Failed to register built-in CJK PDF font: {e}")
-    return "Helvetica"
-
-
-def _build_ai_report_pdf(report: dict, target: dict | None = None, language: str = "en-US") -> bytes:
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import mm
-    from reportlab.platypus import (
-        KeepTogether,
-        Paragraph,
-        SimpleDocTemplate,
-        Spacer,
-        Table,
-        TableStyle,
-    )
-
-    target = target or {}
-    zh = str(language or "").lower().startswith("zh")
-    prefer_cjk = zh or _has_cjk_text(report) or _has_cjk_text(target)
-    font_name = _register_report_pdf_font(prefer_cjk=prefer_cjk)
-    width, height = A4
-    buf = BytesIO()
-
-    labels = {
-        "title": "QuantDinger AI Research Report" if not zh else "QuantDinger AI 投研报告",
-        "subtitle": "AI-assisted market analysis for research use only" if not zh else "AI 辅助市场分析，仅供研究参考",
-        "target": "Target" if not zh else "分析标的",
-        "generated": "Generated" if not zh else "生成时间",
-        "decision": "Decision" if not zh else "观点",
-        "confidence": "Confidence" if not zh else "置信度",
-        "summary": "Executive Summary" if not zh else "核心摘要",
-        "plan": "Trading Plan" if not zh else "交易计划",
-        "scores": "Model Scores" if not zh else "模型评分",
-        "trend": "Trend Outlook" if not zh else "周期趋势预测",
-        "crypto": "Crypto Market Structure" if not zh else "加密市场结构",
-        "details": "Detailed Analysis" if not zh else "详细分析",
-        "reasons": "Key Reasons" if not zh else "核心理由",
-        "risks": "Risk Notes" if not zh else "风险提示",
-        "indicators": "Technical Indicators" if not zh else "技术指标",
-        "disclaimer": (
-            "This report is generated by AI for research only and is not investment advice."
-            if not zh
-            else "本报告由 AI 生成，仅供研究参考，不构成投资建议。"
-        ),
-    }
-
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        rightMargin=16 * mm,
-        leftMargin=16 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
-        title=labels["title"],
-    )
-    content_width = width - doc.leftMargin - doc.rightMargin
-    styles = getSampleStyleSheet()
-    base_style = ParagraphStyle(
-        "ReportBase",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=9.5,
-        leading=15,
-        textColor=colors.HexColor("#273449"),
-        spaceAfter=4,
-    )
-    small_style = ParagraphStyle(
-        "ReportSmall",
-        parent=base_style,
-        fontSize=8,
-        leading=11,
-        textColor=colors.HexColor("#667085"),
-    )
-    title_style = ParagraphStyle(
-        "ReportTitle",
-        parent=base_style,
-        fontSize=22,
-        leading=28,
-        textColor=colors.white,
-        spaceAfter=2,
-    )
-    section_style = ParagraphStyle(
-        "ReportSection",
-        parent=base_style,
-        fontSize=13,
-        leading=17,
-        textColor=colors.HexColor("#0f2f55"),
-        spaceBefore=10,
-        spaceAfter=7,
-    )
-    table_head_style = ParagraphStyle(
-        "ReportTableHead",
-        parent=base_style,
-        fontSize=8,
-        leading=10,
-        textColor=colors.HexColor("#667085"),
-    )
-    table_value_style = ParagraphStyle(
-        "ReportTableValue",
-        parent=base_style,
-        fontSize=9,
-        leading=12,
-        textColor=colors.HexColor("#111827"),
-    )
-
-    def clean_text(value: Any) -> str:
-        text = _plain_text(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return text.replace("\r\n", "\n").replace("\r", "\n").strip()
-
-    def value_text(value: Any) -> str:
-        if value in (None, ""):
-            return "-"
-        if isinstance(value, dict):
-            parts = []
-            preferred = ["trend", "direction", "score", "strength", "summary", "value", "signal"]
-            keys = [key for key in preferred if key in value] + [key for key in value.keys() if key not in preferred]
-            for key in keys[:4]:
-                item = value.get(key)
-                if item not in (None, "", [], {}):
-                    parts.append(f"{str(key).replace('_', ' ').title()}: {value_text(item)}")
-            return "; ".join(parts) or "-"
-        if isinstance(value, (list, tuple)):
-            return "; ".join(value_text(item) for item in value[:5] if item not in (None, "", [], {})) or "-"
-        return clean_text(value)
-
-    def p(text: Any, style: ParagraphStyle = base_style) -> Paragraph:
-        return Paragraph(clean_text(text).replace("\n", "<br/>"), style)
-
-    def section(title: str) -> list[Any]:
-        return [Spacer(1, 5 * mm), Paragraph(clean_text(title), section_style)]
-
-    def pair_table(items: list[tuple[str, Any]], columns: int = 2) -> Table:
-        rows = []
-        row = []
-        for label, value in items:
-            row.append([Paragraph(clean_text(label), table_head_style), Paragraph(value_text(value), table_value_style)])
-            if len(row) == columns:
-                rows.append(row)
-                row = []
-        if row:
-            while len(row) < columns:
-                row.append([Paragraph("", table_head_style), Paragraph("", table_value_style)])
-            rows.append(row)
-
-        col_width = content_width / columns
-        table = Table(rows, colWidths=[col_width] * columns, hAlign="LEFT")
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f7f9fc")),
-            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#d8e1ee")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e6edf5")),
-            ("LEFTPADDING", (0, 0), (-1, -1), 9),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 9),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        return table
-
-    def simple_table(headers: list[str], rows: list[list[Any]]) -> Table:
-        data = [[Paragraph(clean_text(header), table_head_style) for header in headers]]
-        data.extend([[Paragraph(value_text(value), table_value_style) for value in row] for row in rows])
-        table = Table(data, colWidths=[content_width / len(headers)] * len(headers), hAlign="LEFT", repeatRows=1)
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef4fb")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#42526e")),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafcff")]),
-            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#d8e1ee")),
-            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#e6edf5")),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        return table
-
-    def bullet_block(items: Any) -> list[Any]:
-        if not isinstance(items, list):
-            return []
-        return [p(f"- {value_text(item)}") for item in items if value_text(item) != "-"]
-
-    def draw_page(canvas_obj: Any, document: Any) -> None:
-        canvas_obj.saveState()
-        canvas_obj.setFillColor(colors.HexColor("#8a94a6"))
-        canvas_obj.setFont(font_name, 7.5)
-        canvas_obj.drawString(doc.leftMargin, 9 * mm, labels["disclaimer"])
-        canvas_obj.drawRightString(width - doc.rightMargin, 9 * mm, f"QuantDinger Research · {document.page}")
-        canvas_obj.restoreState()
-
-    symbol = report.get("symbol") or target.get("symbol") or ""
-    market = report.get("market") or target.get("market") or ""
-    decision = _plain_text(report.get("decision") or "HOLD").upper()
-    decision_color = colors.HexColor("#15803d" if decision == "BUY" else "#b91c1c" if decision == "SELL" else "#b7791f")
-    story: list[Any] = []
-    header = Table([
-        [
-            [Paragraph(labels["title"], title_style), Paragraph(labels["subtitle"], small_style)],
-            [
-                Paragraph(labels["decision"], small_style),
-                Paragraph(decision, ParagraphStyle("Decision", parent=base_style, fontSize=20, leading=24, textColor=decision_color)),
-            ],
-        ]
-    ], colWidths=[content_width * 0.72, content_width * 0.28])
-    header.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#102033")),
-        ("BOX", (0, 0), (-1, -1), 0, colors.HexColor("#102033")),
-        ("LEFTPADDING", (0, 0), (-1, -1), 13),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 13),
-        ("TOPPADDING", (0, 0), (-1, -1), 13),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 13),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ]))
-    story.append(header)
-    story.append(Spacer(1, 6 * mm))
-    story.append(pair_table([
-        (labels["target"], f"{market}:{symbol}" if market or symbol else "-"),
-        (labels["generated"], _now_utc().strftime("%Y-%m-%d %H:%M UTC")),
-        (labels["confidence"], report.get("confidence", "-")),
-        (labels["decision"], decision),
-    ], columns=2))
-
-    if report.get("summary"):
-        story.extend(section(labels["summary"]))
-        story.append(p(report.get("summary")))
-
-    market_data = report.get("market_data") if isinstance(report.get("market_data"), dict) else {}
-    plan = report.get("trading_plan") if isinstance(report.get("trading_plan"), dict) else {}
-    plan_items = [
-        ("Current Price", market_data.get("current_price")),
-        ("24h Change", market_data.get("change_24h")),
-        ("Entry", plan.get("entry_price") or plan.get("entryPrice")),
-        ("Stop Loss", plan.get("stop_loss") or plan.get("stopLoss")),
-        ("Take Profit", plan.get("take_profit") or plan.get("takeProfit")),
-        ("Risk/Reward", plan.get("risk_reward_ratio") or plan.get("riskRewardRatio")),
-    ]
-    if any(v not in (None, "") for _, v in plan_items):
-        story.extend(section(labels["plan"]))
-        story.append(pair_table([(k, "-" if v in (None, "") else v) for k, v in plan_items]))
-
-    scores = report.get("scores") if isinstance(report.get("scores"), dict) else {}
-    if scores:
-        story.extend(section(labels["scores"]))
-        story.append(pair_table([(str(k).replace("_", " ").title(), v) for k, v in scores.items()]))
-
-    trend = report.get("trend_outlook") or report.get("trendOutlook")
-    trend_summary = report.get("trend_outlook_summary") or report.get("trendOutlookSummary")
-    if trend_summary or trend:
-        story.extend(section(labels["trend"]))
-        if trend_summary:
-            story.append(p(trend_summary))
-        if isinstance(trend, dict):
-            story.append(simple_table(
-                ["Horizon", "Outlook"] if not zh else ["周期", "预测"],
-                [[str(k), v] for k, v in trend.items()],
-            ))
-
-    crypto_summary = report.get("crypto_factor_summary")
-    crypto_factors = report.get("crypto_factors") if isinstance(report.get("crypto_factors"), dict) else {}
-    if crypto_summary or crypto_factors:
-        story.extend(section(labels["crypto"]))
-        if crypto_summary:
-            story.append(p(crypto_summary))
-        if crypto_factors:
-            story.append(pair_table([(str(k).replace("_", " "), v) for k, v in crypto_factors.items() if k != "signals"]))
-
-    details = report.get("detailed_analysis") if isinstance(report.get("detailed_analysis"), dict) else {}
-    if details:
-        story.extend(section(labels["details"]))
-        for key, value in details.items():
-            story.append(KeepTogether([
-                Paragraph(clean_text(str(key).replace("_", " ").title()), ParagraphStyle(
-                    f"Detail{key}",
-                    parent=base_style,
-                    fontSize=10.5,
-                    leading=14,
-                    textColor=colors.HexColor("#0f2f55"),
-                    spaceBefore=3,
-                )),
-                p(value),
-            ]))
-
-    if report.get("reasons"):
-        story.extend(section(labels["reasons"]))
-        story.extend(bullet_block(report.get("reasons")))
-    if report.get("risks"):
-        story.extend(section(labels["risks"]))
-        story.extend(bullet_block(report.get("risks")))
-
-    indicators = report.get("indicators") if isinstance(report.get("indicators"), dict) else {}
-    if indicators:
-        story.extend(section(labels["indicators"]))
-        story.append(pair_table([(str(k).replace("_", " "), v) for k, v in indicators.items()]))
-
-    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
-    return buf.getvalue()
-
-
 @ai_chat_blp.route("/chat/report/pdf", methods=["POST"])
 @login_required
 def export_chat_report_pdf():
@@ -2871,7 +2375,7 @@ def export_chat_report_pdf():
     target = data.get("target") if isinstance(data.get("target"), dict) else {}
     language = str(data.get("language") or request.headers.get("X-App-Lang") or "en-US")
     try:
-        pdf_bytes = _build_ai_report_pdf(report, target, language)
+        pdf_bytes = build_ai_report_pdf(report, target, language)
     except ImportError:
         return jsonify({"code": 0, "msg": "PDF export dependency missing: install reportlab", "data": None}), 500
     except Exception as e:
@@ -2899,3 +2403,5 @@ def save_chat_history():
 
 # openapi-compat: legacy import name
 ai_chat_bp = ai_chat_blp
+
+

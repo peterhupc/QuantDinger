@@ -393,11 +393,11 @@ docker compose -f docker-compose.ghcr.yml up -d
 
 ```env
 # 常规场景：前后端同步 pin 到同一个 tag
-IMAGE_TAG=4.0.3
+IMAGE_TAG=4.0.4
 
 # 进阶（按需启用）：单独覆盖某一边，另一边仍跟随 IMAGE_TAG
-# BACKEND_TAG=4.0.3
-# FRONTEND_TAG=4.0.3
+# BACKEND_TAG=4.0.4
+# FRONTEND_TAG=4.0.4
 # MOBILE_TAG=4.0.3
 
 # BACKEND_IMAGE=ghcr.io/<你的fork>/quantdinger-backend     # 可选，用于 fork

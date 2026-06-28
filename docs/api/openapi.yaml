@@ -1112,9 +1112,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: Get current user's notification settings.
-      description: "Returns:\nnotification_settings: {\n    default_channels: ['browser',\
-        \ 'telegram', ...],\n    telegram_chat_id: str,\n    email: str (optional,\
-        \ override for notifications),\n    discord_webhook: str (optional)\n}"
       tags:
       - Users
       operationId: getApiUsersNotificationSettings
@@ -1134,17 +1131,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: Update current user's notification settings.
-      description: 'Request body:
-
-        default_channels: list of str (optional, e.g. [''browser'', ''telegram''])
-
-        telegram_bot_token: str (optional, user''s own Telegram bot token)
-
-        telegram_chat_id: str (optional)
-
-        email: str (optional, for notification override)
-
-        discord_webhook: str (optional)'
       tags:
       - Users
       operationId: putApiUsersNotificationSettings
@@ -1222,13 +1208,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Send a test notification using the current user's saved notification_settings
+      summary: Send a test notification using saved notification settings.
       tags:
       - Users
       operationId: postApiUsersNotificationSettingsTest
-      description: 'Send a test notification using the current user''s saved notification_settings
-
-        (save settings first via PUT /notification-settings).'
       x-visibility: internal
   /api/users/change-password:
     post:
@@ -1246,11 +1229,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: Change current user's password.
-      description: 'Request body:
-
-        old_password: str (required)
-
-        new_password: str (required)'
       tags:
       - Users
       operationId: postApiUsersChangePassword
@@ -1279,7 +1257,7 @@ paths:
 
         status: str (optional, filter by status: running/stopped/all)
 
-        execution_mode: str (optional, live/signal — omit or all for any)
+        execution_mode: str (optional, live/signal; omit or all for any)
 
         search: str (optional, search by strategy name/symbol/username/id)
 
@@ -1319,7 +1297,7 @@ paths:
 
         id / strategy_id: strategy primary key
 
-        action: optional ``start`` | ``stop`` — omit to toggle current status'
+        action: optional ``start`` | ``stop``; omit to toggle current status'
       tags:
       - Users
       operationId: postApiUsersSystemStrategiesToggle
@@ -1386,8 +1364,8 @@ paths:
         \ the order to 'confirmed'.\n    - Stamps tx_hash + paid_at (if empty) + confirmed_at\
         \ + admin_note\n      + manual_confirmed_by + matched_via='manual_admin'.\n\
         \    - Calls ``purchase_membership`` exactly once per order (idempotent\n\
-        \      on re-submit — already-confirmed orders only refresh the audit\n  \
-        \    fields, no double-grant).\n    - Refuses ``status='cancelled'`` orders\
+        \      on re-submit; already-confirmed orders only refresh the audit\n   \
+        \   fields, no double-grant).\n    - Refuses ``status='cancelled'`` orders\
         \ so the admin doesn't\n      accidentally resurrect a deliberately-cancelled\
         \ refund."
       tags:
@@ -1651,7 +1629,7 @@ paths:
       summary: Return supported market types for the add-watchlist modal.
       description: 'Visibility is controlled by the centralised :mod:`app.utils.market_visibility`
 
-        rules — primarily the ``ENABLED_MARKETS`` whitelist, with
+        rules, primarily the ``ENABLED_MARKETS`` whitelist, with
 
         ``SHOW_CN_STOCK`` / ``SHOW_HK_STOCK`` kept for back-compat. The radar
 
@@ -1787,20 +1765,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: Remove a symbol from watchlist for the current user.
-      description: 'The watchlist table has ``UNIQUE(user_id, market, symbol)`` but
-        a long-
-
-        standing bug here only matched on ``(user_id, symbol)``, so a removal could
-
-        in principle wipe rows across markets (e.g. a manually-added ``BTC`` row
-
-        in CNStock vs Crypto). We now require ``market`` in the request and use
-
-        it in the ``WHERE`` clause. For Crypto we additionally canonicalise the
-
-        symbol so the legacy clients still sending ``"BTC"`` resolve to the
-
-        canonical ``"BTC/USDT"`` row written by the new ``add_watchlist`` logic.'
       tags:
       - Market
       operationId: postApiMarketWatchlistRemove
@@ -1821,16 +1785,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: Get realtime prices for the current user's watchlist.
-      description: 'Historical contract accepted a `watchlist=[{market,symbol},...]`
-        query
-
-        parameter, which (combined with no auth) let any caller fan out arbitrary
-
-        market/symbol combinations to upstream data providers. We now ignore that
-
-        parameter and read the authenticated user''s watchlist straight from the
-
-        DB. The query param is still parsed for back-compat logging only.'
       tags:
       - Market
       operationId: getApiMarketWatchlistPrices

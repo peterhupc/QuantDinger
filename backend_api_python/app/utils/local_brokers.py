@@ -1,4 +1,4 @@
-﻿"""Local desktop broker policy for IBKR."""
+"""Local desktop broker policy for IBKR."""
 
 from __future__ import annotations
 
